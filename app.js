@@ -1,6 +1,7 @@
 import { firebaseConfig } from './config.js';
 
-const store = firebaseConfig
+// "?local" in the address runs the offline preview store (handy for trying designs).
+const store = firebaseConfig && !new URLSearchParams(location.search).has('local')
   ? await import('./store-firebase.js')
   : await import('./store-local.js');
 
@@ -16,28 +17,32 @@ let lastCreatedCode = null;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Turn Kurdish/Arabic digits (٠-٩, ۰-۹) into 0-9 so either keyboard works.
+const latinDigits = s => String(s)
+  .replace(/[٠-٩]/g, d => d.charCodeAt(0) - 0x0660)
+  .replace(/[۰-۹]/g, d => d.charCodeAt(0) - 0x06F0)
+  .replace(/٫/g, '.').replace(/[٬,\s]/g, '');
+
 function toast(msg) {
   $toast.textContent = msg;
   $toast.classList.add('show');
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => $toast.classList.remove('show'), 2600);
+  toast.t = setTimeout(() => $toast.classList.remove('show'), 2800);
 }
 
 function clearWatchers() { cleanups.forEach(fn => fn && fn()); cleanups = []; }
-
-function money(n, currency) {
-  const digits = currency === 'IQD' ? 0 : 2;
-  const v = Number(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-  return currency === 'USD' ? `$${v}` : `${v} ${currency}`;
-}
 
 function num(n, currency) {
   const digits = currency === 'IQD' ? 0 : 2;
   return Number(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
+function money(n, currency) {
+  return currency === 'USD' ? `$${num(n, currency)}` : `${num(n, currency)} دینار`;
+}
+const curName = c => c === 'USD' ? 'دۆلار' : 'دینار';
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['کانوونی دووەم', 'شوبات', 'ئازار', 'نیسان', 'ئایار', 'حوزەیران', 'تەممووز', 'ئاب', 'ئەیلوول', 'تشرینی یەکەم', 'تشرینی دووەم', 'کانوونی یەکەم'];
+const DAYS = ['یەکشەممە', 'دووشەممە', 'سێشەممە', 'چوارشەممە', 'پێنجشەممە', 'هەینی', 'شەممە'];
 
 // Weeks run Saturday to Friday.
 function weekStart(date) {
@@ -51,13 +56,12 @@ function shiftWeek(k, n) { const d = fromKey(k); d.setDate(d.getDate() + 7 * n);
 const thisWeek = () => keyOf(weekStart(new Date()));
 function weekLabel(k) {
   const a = fromKey(k), b = fromKey(k); b.setDate(b.getDate() + 6);
-  const left = `${a.getDate()} ${MONTHS[a.getMonth()]}`;
-  const right = `${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}`;
-  return `${left} – ${right}`;
+  if (a.getMonth() === b.getMonth()) return `${a.getDate()} – ${b.getDate()}ی ${MONTHS[b.getMonth()]}`;
+  return `${a.getDate()}ی ${MONTHS[a.getMonth()]} – ${b.getDate()}ی ${MONTHS[b.getMonth()]}`;
 }
 function stamp(ms) {
   const d = new Date(ms);
-  return `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${DAYS[d.getDay()]} ${d.getDate()}ی ${MONTHS[d.getMonth()]}، ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 /* ---------- the reckoning: who pays whom ---------- */
@@ -65,7 +69,7 @@ function stamp(ms) {
 function reckon(expenses, group) {
   const scale = group.currency === 'IQD' ? 1 : 100;
   const people = {};
-  const ensure = (uid, name) => (people[uid] ||= { uid, name: name || group.memberNames?.[uid] || 'Former member', paid: 0, share: 0 });
+  const ensure = (uid, name) => (people[uid] ||= { uid, name: name || group.memberNames?.[uid] || 'ئەندامی پێشوو', paid: 0, share: 0 });
   (group.memberIds || []).forEach(uid => ensure(uid));
 
   for (const e of expenses) {
@@ -98,16 +102,14 @@ function reckon(expenses, group) {
 function masthead(sub) {
   return `
     <header class="masthead">
-      <div class="rule-double"></div>
-      <h1 class="title"><a href="#/">The House Ledger</a></h1>
+      <h1 class="title"><a href="#/">دەفتەری ماڵ</a></h1>
       <p class="subtitle">${sub}</p>
-      <div class="rule-double"></div>
     </header>`;
 }
 
 function previewNote() {
   return store.mode === 'local'
-    ? `<p class="preview-note">Preview edition &middot; entries are kept on this device only</p>`
+    ? `<p class="preview-note">وەشانی تاقیکردنەوە · زانیارییەکان تەنها لەسەر ئەم ئامێرە دەمێننەوە</p>`
     : '';
 }
 
@@ -115,31 +117,32 @@ function previewNote() {
 
 function renderAuth(tab = 'in') {
   $app.innerHTML = `
-    ${masthead('Shared purchases, fairly divided')}
+    ${masthead('خەرجییە هاوبەشەکان، بە یەکسانی دابەشکراو')}
     <section class="card">
       <div class="tabs" role="tablist">
-        <button class="tab ${tab === 'in' ? 'on' : ''}" data-tab="in">Sign in</button>
-        <button class="tab ${tab === 'up' ? 'on' : ''}" data-tab="up">New account</button>
+        <button class="tab ${tab === 'in' ? 'on' : ''}" data-tab="in">چوونەژوورەوە</button>
+        <button class="tab ${tab === 'up' ? 'on' : ''}" data-tab="up">هەژماری نوێ</button>
       </div>
       <form id="authForm" class="form" autocomplete="on">
         ${tab === 'up' ? `
-        <label>Your name
-          <input name="name" required maxlength="30" autocomplete="name" placeholder="As your friends know you">
+        <label>ناوت
+          <input name="name" required maxlength="30" autocomplete="name" placeholder="ئەو ناوەی هاوڕێکانت پێی دەتناسن">
         </label>` : ''}
-        <label>Username
-          <input name="username" required minlength="3" maxlength="20" pattern="[A-Za-z0-9_.]+"
-            autocapitalize="none" autocomplete="username" placeholder="letters and numbers">
+        <label>ناوی بەکارهێنەر
+          <input name="username" dir="ltr" required minlength="3" maxlength="20" pattern="[A-Za-z0-9_.]+"
+            title="تەنها پیتی ئینگلیزی و ژمارە"
+            autocapitalize="none" autocomplete="username" placeholder="username">
         </label>
-        <label>Password
-          <input name="password" type="password" required minlength="6"
-            autocomplete="${tab === 'up' ? 'new-password' : 'current-password'}" placeholder="at least 6 characters">
+        <label>وشەی نهێنی
+          <input name="password" dir="ltr" type="password" required minlength="6"
+            autocomplete="${tab === 'up' ? 'new-password' : 'current-password'}" placeholder="••••••">
         </label>
         <p class="error" id="authErr"></p>
-        <button class="btn primary" type="submit">${tab === 'up' ? 'Open my account' : 'Sign in'}</button>
+        <button class="btn primary" type="submit">${tab === 'up' ? 'دروستکردنی هەژمار' : 'چوونەژوورەوە'}</button>
       </form>
       <p class="fine">${tab === 'up'
-        ? 'This phone will remember you, so next time you go straight to your groups.'
-        : 'New here? Choose &ldquo;New account&rdquo; above.'}</p>
+        ? 'ناوی بەکارهێنەر تەنها بە پیتی ئینگلیزی و ژمارە بێت. وشەی نهێنی لانیکەم 6 پیت. ئەم مۆبایلە بیرت دەمێنێت، جاری داهاتوو ڕاستەوخۆ دەچیتە ناو گرووپەکانت.'
+        : 'یەکەم جارتە؟ «هەژماری نوێ» هەڵبژێرە.'}</p>
     </section>
     ${previewNote()}`;
 
@@ -162,16 +165,16 @@ function renderAuth(tab = 'in') {
 
 function renderHome() {
   $app.innerHTML = `
-    ${masthead(`Good day, ${esc(user.name)}`)}
+    ${masthead(`بەخێربێیت، ${esc(user.name)}`)}
     <section class="card">
-      <h2 class="section-title">Your Groups</h2>
-      <ul class="group-list" id="myGroups"><li class="muted">Turning the pages&hellip;</li></ul>
+      <h2 class="section-title">گرووپەکانت</h2>
+      <ul class="group-list" id="myGroups"><li class="muted">چاوەڕێ بکە…</li></ul>
     </section>
     <div class="actions">
-      <a class="btn primary" href="#/new">Found a new group</a>
-      <a class="btn" href="#/find">Find a group</a>
+      <a class="btn primary" href="#/new">دروستکردنی گرووپی نوێ</a>
+      <a class="btn" href="#/find">گەڕان بۆ گرووپ</a>
     </div>
-    <p class="signout"><button class="link" id="signOut">Sign out (${esc(user.username)})</button></p>
+    <p class="signout"><button class="link" id="signOut">چوونەدەرەوە (${esc(user.username)})</button></p>
     ${previewNote()}`;
 
   document.getElementById('signOut').onclick = () => store.signOut();
@@ -181,37 +184,37 @@ function renderHome() {
     ul.innerHTML = groups.length ? groups.map(g => `
       <li><a href="#/g/${g.id}">
         <span class="g-name">${esc(g.name)}</span>
-        <span class="g-meta">${g.memberIds.length} of ${g.size} members${g.ownerId === user.uid ? ' &middot; founder' : ''}</span>
+        <span class="g-meta">${g.memberIds.length} لە ${g.size} ئەندام${g.ownerId === user.uid ? ' · دامەزرێنەر' : ''}</span>
       </a></li>`).join('')
-      : `<li class="muted">You belong to no group yet. Found one, or find your friends&rsquo; group and join it with its code.</li>`;
+      : `<li class="muted">هێشتا لە هیچ گرووپێکدا نیت. گرووپێک دروست بکە، یان گرووپی هاوڕێکانت بدۆزەرەوە و بە کۆدەکەی بچۆ ناوی.</li>`;
   }));
 }
 
 function renderNew() {
   $app.innerHTML = `
-    ${masthead('Found a new group')}
+    ${masthead('گرووپی نوێ')}
     <section class="card">
       <form id="newForm" class="form">
-        <label>Name of the group
-          <input name="name" required maxlength="40" placeholder="e.g. Flat 4, Bakhtiari Street">
+        <label>ناوی گرووپ
+          <input name="name" required maxlength="40" placeholder="بۆ نموونە: ماڵی خوێندکاران">
         </label>
-        <label>Number of members
+        <label>ژمارەی ئەندامان
           <select name="size">
             ${Array.from({ length: 19 }, (_, i) => i + 2).map(n => `<option ${n === 4 ? 'selected' : ''}>${n}</option>`).join('')}
           </select>
         </label>
-        <label>Money is counted in
+        <label>دراو
           <select name="currency">
-            <option value="IQD">Iraqi dinar (IQD)</option>
-            <option value="USD">US dollar (USD)</option>
+            <option value="IQD">دیناری عێراقی (IQD)</option>
+            <option value="USD">دۆلاری ئەمریکی (USD)</option>
           </select>
         </label>
         <p class="error" id="newErr"></p>
-        <button class="btn primary" type="submit">Found the group</button>
+        <button class="btn primary" type="submit">دروستکردنی گرووپ</button>
       </form>
-      <p class="fine">A six-digit code will be made for the group. Give it only to your members.</p>
+      <p class="fine">کۆدێکی 6 ژمارەیی بۆ گرووپەکە دروست دەبێت. تەنها بیدە بە ئەندامەکانت.</p>
     </section>
-    <p class="back"><a href="#/">&larr; Back to your groups</a></p>`;
+    <p class="back"><a href="#/">گەڕانەوە بۆ گرووپەکانت</a></p>`;
 
   const form = document.getElementById('newForm');
   form.onsubmit = async ev => {
@@ -232,25 +235,25 @@ function renderNew() {
 
 function renderFind() {
   $app.innerHTML = `
-    ${masthead('Find a group')}
+    ${masthead('گەڕان بۆ گرووپ')}
     <section class="card">
       <form id="findForm" class="search">
-        <input name="q" type="search" placeholder="Search by group name" autocomplete="off">
-        <button class="btn" type="submit">Search</button>
+        <input name="q" type="search" placeholder="ناوی گرووپ بنووسە" autocomplete="off">
+        <button class="btn" type="submit">گەڕان</button>
       </form>
       <ul class="group-list" id="results"></ul>
     </section>
-    <p class="back"><a href="#/">&larr; Back to your groups</a></p>
+    <p class="back"><a href="#/">گەڕانەوە بۆ گرووپەکانت</a></p>
     <dialog id="codeDlg" class="dialog">
       <form method="dialog" id="codeForm" class="form">
         <h3 id="dlgTitle" class="section-title"></h3>
-        <p class="fine">Ask the founder for the group&rsquo;s six-digit code.</p>
-        <input id="codeInput" class="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
-          autocomplete="one-time-code" placeholder="&middot; &middot; &middot; &middot; &middot; &middot;" required>
+        <p class="fine" style="margin:0">کۆدە 6 ژمارەییەکەی گرووپ لە دامەزرێنەرەکەی وەربگرە.</p>
+        <input id="codeInput" class="code-input" inputmode="numeric" maxlength="6"
+          autocomplete="one-time-code" placeholder="------" required>
         <p class="error" id="codeErr"></p>
         <div class="row">
-          <button class="btn" type="button" id="dlgCancel">Cancel</button>
-          <button class="btn primary" type="submit" id="dlgJoin">Join</button>
+          <button class="btn" type="button" id="dlgCancel">پاشگەزبوونەوە</button>
+          <button class="btn primary" type="submit" id="dlgJoin">چوونە ناو گرووپ</button>
         </div>
       </form>
     </dialog>`;
@@ -261,7 +264,7 @@ function renderFind() {
   let target = null;
 
   async function run() {
-    results.innerHTML = `<li class="muted">Searching&hellip;</li>`;
+    results.innerHTML = `<li class="muted">دەگەڕێم…</li>`;
     try {
       const list = await store.searchGroups(form.q.value);
       results.innerHTML = list.length ? list.map(g => {
@@ -269,10 +272,9 @@ function renderFind() {
         const full = g.memberIds.length >= g.size;
         return `<li><button class="row-btn" data-id="${g.id}" data-name="${esc(g.name)}" data-mine="${mine}" ${full && !mine ? 'disabled' : ''}>
           <span class="g-name">${esc(g.name)}</span>
-          <span class="g-meta">founded by ${esc(g.ownerName)} &middot; ${g.memberIds.length} of ${g.size}
-            ${mine ? ' &middot; <em>you are in</em>' : full ? ' &middot; <em>full</em>' : ''}</span>
+          <span class="g-meta">دامەزرێنەر: ${esc(g.ownerName)} · ${g.memberIds.length} لە ${g.size}${mine ? ' · تۆ ئەندامیت' : full ? ' · پڕە' : ''}</span>
         </button></li>`;
-      }).join('') : `<li class="muted">No group by that name.</li>`;
+      }).join('') : `<li class="muted">هیچ گرووپێک بەم ناوە نییە.</li>`;
     } catch (e) { results.innerHTML = `<li class="error">${esc(e.message)}</li>`; }
   }
   form.onsubmit = ev => { ev.preventDefault(); run(); };
@@ -293,14 +295,14 @@ function renderFind() {
   document.getElementById('dlgCancel').onclick = () => dlg.close();
   document.getElementById('codeForm').onsubmit = async ev => {
     ev.preventDefault();
-    const code = document.getElementById('codeInput').value.trim();
-    if (!/^\d{6}$/.test(code)) { document.getElementById('codeErr').textContent = 'The code has six digits.'; return; }
+    const code = latinDigits(document.getElementById('codeInput').value);
+    if (!/^\d{6}$/.test(code)) { document.getElementById('codeErr').textContent = 'کۆدەکە دەبێت 6 ژمارە بێت.'; return; }
     const btn = document.getElementById('dlgJoin');
     btn.disabled = true;
     try {
       await store.joinGroup(target, code);
       dlg.close();
-      toast('Welcome to the group.');
+      toast('بەخێربێیت بۆ گرووپەکە.');
       location.hash = `#/g/${target}`;
     } catch (e) {
       document.getElementById('codeErr').textContent = e.message;
@@ -313,19 +315,19 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
 
   $app.innerHTML = `
     <header class="board-head">
-      <a href="#/" class="back-mini">&larr; Groups</a>
+      <a href="#/" class="back-mini">→ گرووپەکان</a>
       <h1 class="board-title" id="gName">&nbsp;</h1>
       <p class="board-sub" id="gSub">&nbsp;</p>
     </header>
     <nav class="week-nav">
-      <a href="#/g/${gid}/${tab}/${shiftWeek(week, -1)}" aria-label="Previous week">&lsaquo;</a>
-      <span><small>Week of</small>${weekLabel(week)}</span>
-      ${week < thisWeek() ? `<a href="#/g/${gid}/${tab}/${shiftWeek(week, 1)}" aria-label="Next week">&rsaquo;</a>` : '<i></i>'}
+      <a href="#/g/${gid}/${tab}/${shiftWeek(week, -1)}" aria-label="هەفتەی پێشوو">›</a>
+      <span><small>هەفتەی</small>${weekLabel(week)}</span>
+      ${week < thisWeek() ? `<a href="#/g/${gid}/${tab}/${shiftWeek(week, 1)}" aria-label="هەفتەی دواتر">‹</a>` : '<i>‹</i>'}
     </nav>
     <div class="tabs board-tabs">
-      <a class="tab ${tab === 'entries' ? 'on' : ''}" href="#/g/${gid}/entries/${week}">Entries</a>
-      <a class="tab ${tab === 'reckoning' ? 'on' : ''}" href="#/g/${gid}/reckoning/${week}">Reckoning</a>
-      <a class="tab ${tab === 'members' ? 'on' : ''}" href="#/g/${gid}/members/${week}">Members</a>
+      <a class="tab ${tab === 'entries' ? 'on' : ''}" href="#/g/${gid}/entries/${week}">تۆمارەکان</a>
+      <a class="tab ${tab === 'reckoning' ? 'on' : ''}" href="#/g/${gid}/reckoning/${week}">حیساب</a>
+      <a class="tab ${tab === 'members' ? 'on' : ''}" href="#/g/${gid}/members/${week}">ئەندامان</a>
     </div>
     <main id="pane"></main>`;
 
@@ -335,11 +337,11 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
     const g = state.group;
     if (!g) return;
     if (!g.memberIds.includes(user.uid)) {
-      pane.innerHTML = `<section class="card"><p>You are not a member of this group. <a href="#/find">Find it and join with the code.</a></p></section>`;
+      pane.innerHTML = `<section class="card"><p>تۆ ئەندامی ئەم گرووپە نیت. <a href="#/find">بیدۆزەرەوە و بە کۆدەکە بچۆ ناوی.</a></p></section>`;
       return;
     }
     document.getElementById('gName').textContent = g.name;
-    document.getElementById('gSub').textContent = `${g.memberIds.length} of ${g.size} members · ${g.currency}`;
+    document.getElementById('gSub').textContent = `${g.memberIds.length} لە ${g.size} ئەندام · ${curName(g.currency)}`;
     if (tab === 'entries') drawEntries(g);
     else if (tab === 'reckoning') drawReckoning(g);
     else drawMembers(g);
@@ -349,41 +351,41 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
     const total = state.expenses.reduce((s, e) => s + e.amount, 0);
     const isCurrent = week === thisWeek();
     const ledgerHTML = `
-        <h2 class="section-title">This Week&rsquo;s Entries</h2>
+        <h2 class="section-title">تۆمارەکانی ئەم هەفتەیە</h2>
         ${state.expenses.length ? `<ol class="entries">${state.expenses.map(e => entryHTML(e, g)).join('')}</ol>
-          <div class="total"><span>Spent this week</span><span>${money(total, g.currency)}</span></div>`
-        : `<p class="muted center">Nothing entered this week.</p>`}`;
+          <div class="total"><span>کۆی خەرجی هەفتە</span><span class="amt">${money(total, g.currency)}</span></div>`
+        : `<p class="muted center">هێشتا هیچ شتێک تۆمار نەکراوە.</p>`}`;
     const ledger = document.getElementById('ledger');
     if (ledger) { ledger.innerHTML = ledgerHTML; bindEntryButtons(); return; }
 
     pane.innerHTML = `
       ${isCurrent ? `
       <section class="card">
-        <h2 class="section-title">New Entry</h2>
+        <h2 class="section-title">تۆمارێکی نوێ</h2>
         <form id="addForm" class="form">
-          <label>What was bought
-            <input name="item" required maxlength="80" placeholder="e.g. Bread, rice and tea">
+          <label>چیت کڕیوە
+            <input name="item" required maxlength="80" placeholder="بۆ نموونە: نان و برنج و چا">
           </label>
-          <label>Amount paid (${g.currency})
+          <label>چەندت داوە (${curName(g.currency)})
             <input name="amount" required inputmode="decimal" placeholder="0">
           </label>
-          <label class="check"><input type="checkbox" name="me" checked> I share in this too</label>
-          <button class="btn primary" type="submit">Enter in the ledger</button>
+          <label class="check"><input type="checkbox" name="me" checked> منیش بەشدارم تێیدا</label>
+          <button class="btn primary" type="submit">زیادکردن</button>
         </form>
-      </section>` : `<p class="fine center">This week is closed. New entries go into the current week.</p>`}
+      </section>` : `<p class="fine center">ئەم هەفتەیە تەواو بووە. تۆماری نوێ دەچێتە سەر هەفتەی ئێستا.</p>`}
       <section class="card ledger" id="ledger">${ledgerHTML}</section>`;
 
     const form = document.getElementById('addForm');
     if (form) form.onsubmit = async ev => {
       ev.preventDefault();
-      const amount = Number(String(form.amount.value).replace(/[,\s]/g, ''));
-      if (!(amount > 0)) { toast('Please write the amount as a number.'); return; }
+      const amount = Number(latinDigits(form.amount.value));
+      if (!(amount > 0)) { toast('تکایە بڕەکە بە ژمارە بنووسە.'); return; }
       const btn = form.querySelector('button[type=submit]');
       btn.disabled = true;
       try {
         await store.addExpense(gid, { item: form.item.value.trim(), amount, includeMe: form.me.checked, weekKey: week });
         form.reset(); form.me.checked = true;
-        toast('Entered. The others can now say if they share in it.');
+        toast('زیادکرا. ئێستا ئەوانی تر دەتوانن بڵێن بەشدارن یان نا.');
       } catch (e) { toast(e.message); }
       btn.disabled = false;
     };
@@ -397,7 +399,7 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
       catch (e) { toast(e.message); b.disabled = false; }
     });
     pane.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-      if (!confirm('Strike this entry from the ledger?')) return;
+      if (!confirm('ئەم تۆمارە بسڕدرێتەوە؟')) return;
       try { await store.deleteExpense(gid, b.dataset.del); } catch (e) { toast(e.message); }
     });
   }
@@ -405,24 +407,24 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
   function entryHTML(e, g) {
     const n = e.participants.length;
     const iAmIn = e.participants.includes(user.uid);
-    const names = e.participants.map(u => u === user.uid ? 'you' : (g.memberNames[u] || 'former member'));
-    const payer = e.paidBy === user.uid ? 'you' : esc(e.paidByName);
+    const names = e.participants.map(u => u === user.uid ? 'تۆ' : (g.memberNames[u] || 'ئەندامی پێشوو'));
+    const payer = e.paidBy === user.uid ? 'تۆ' : esc(e.paidByName);
     return `
       <li class="entry">
         <div class="entry-top">
           <span class="item">${esc(e.item)}</span>
           <span class="amt">${money(e.amount, g.currency)}</span>
         </div>
-        <div class="entry-meta">paid by ${payer} &middot; ${stamp(e.createdAt)}</div>
+        <div class="entry-meta">${payer} پارەی داوە · ${stamp(e.createdAt)}</div>
         <div class="entry-share">
-          ${n ? `Shared by ${names.map(esc).join(', ')} &mdash; <b>${money(e.amount / n, g.currency)}</b> each`
-              : `<em>No one has joined this yet.</em>`}
+          ${n ? `بەشداربووان: ${names.map(esc).join('، ')} — هەر کەسە <b class="amt">${money(e.amount / n, g.currency)}</b>`
+              : `هێشتا کەس بەشدار نییە.`}
         </div>
         <div class="entry-actions">
           ${iAmIn
-            ? `<button class="btn small" data-join="0" data-id="${e.id}">Count me out</button>`
-            : `<button class="btn small primary" data-join="1" data-id="${e.id}">I share in this</button>`}
-          ${e.paidBy === user.uid ? `<button class="link danger" data-del="${e.id}">Strike out</button>` : ''}
+            ? `<button class="btn small" data-join="0" data-id="${e.id}">دەرمبهێنە</button>`
+            : `<button class="btn small primary" data-join="1" data-id="${e.id}">منیش بەشدارم</button>`}
+          ${e.paidBy === user.uid ? `<button class="link danger" data-del="${e.id}">سڕینەوە</button>` : ''}
         </div>
       </li>`;
   }
@@ -432,34 +434,34 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
     const paid = state.weekDoc.paid || {};
     pane.innerHTML = `
       <section class="card">
-        <h2 class="section-title">Settling Up</h2>
+        <h2 class="section-title">کێ دەبێت چەند بدات</h2>
         ${transfers.length ? `<ul class="transfers">${transfers.map(t => {
           const key = `${t.from.uid}_${t.to.uid}`;
           const done = !!paid[key];
           const mine = t.from.uid === user.uid, toMe = t.to.uid === user.uid;
+          const line = mine
+            ? `<span><b>تۆ</b> دەبێت بدەیت بە <b>${esc(t.to.name)}</b></span>`
+            : `<span><b>${esc(t.from.name)}</b> دەبێت بدات بە <b>${toMe ? 'تۆ' : esc(t.to.name)}</b></span>`;
           return `<li class="${done ? 'done' : ''} ${mine ? 'mine' : ''}">
-            <div class="t-line">
-              <span><b>${mine ? 'You' : esc(t.from.name)}</b> ${mine ? 'pay' : 'pays'} <b>${toMe ? 'you' : esc(t.to.name)}</b></span>
-              <span class="amt">${money(t.amount, g.currency)}</span>
-            </div>
-            <label class="check small"><input type="checkbox" data-key="${key}" ${done ? 'checked' : ''}> Settled</label>
+            <div class="t-line">${line}<span class="amt">${money(t.amount, g.currency)}</span></div>
+            <label class="check small"><input type="checkbox" data-key="${key}" ${done ? 'checked' : ''}> دراوە</label>
           </li>`;
         }).join('')}</ul>`
-        : `<p class="muted center">${state.expenses.length ? 'All square. Nobody owes anything this week.' : 'Nothing to settle this week.'}</p>`}
+        : `<p class="muted center">${state.expenses.length ? 'هەموو شت یەکسانە، کەس قەرزار نییە.' : 'ئەم هەفتەیە هیچ شتێک نییە بۆ حیسابکردن.'}</p>`}
       </section>
       <section class="card">
-        <h2 class="section-title">The Week&rsquo;s Account</h2>
+        <h2 class="section-title">حیسابی هەفتە</h2>
         <table class="acct">
-          <thead><tr><th>Member</th><th>Paid</th><th>Share</th><th>Balance</th></tr></thead>
+          <thead><tr><th>ئەندام</th><th>داویەتی</th><th>بەشی</th><th>ئەنجام</th></tr></thead>
           <tbody>${rows.map(r => `
             <tr${r.uid === user.uid ? ' class="me"' : ''}>
-              <td>${esc(r.name)}</td>
+              <td>${esc(r.name)}${r.uid === user.uid ? ' (تۆ)' : ''}</td>
               <td>${num(r.paid, g.currency)}</td>
               <td>${num(r.share, g.currency)}</td>
               <td class="${r.net > 0.004 ? 'plus' : r.net < -0.004 ? 'minus' : ''}">${r.net > 0.004 ? '+' : ''}${num(r.net, g.currency)}</td>
             </tr>`).join('')}</tbody>
         </table>
-        <p class="fine">Amounts in ${g.currency}. Every purchase is divided equally among the members who share in it. A plus balance means the others owe you.</p>
+        <p class="fine">بڕەکان بە ${curName(g.currency)}ن. هەر کڕینێک بە یەکسانی لەنێوان ئەو کەسانەدا دابەش دەکرێت کە بەشدار بوون تێیدا. ئەنجامی (+) واتە ئەوانی تر قەرزاری تۆن، (−) واتە تۆ قەرزاریت.</p>
       </section>`;
 
     pane.querySelectorAll('[data-key]').forEach(c => c.onchange = async () => {
@@ -472,36 +474,36 @@ function renderBoard(gid, tab = 'entries', week = thisWeek()) {
     const open = g.size - g.memberIds.length;
     const fresh = lastCreatedCode && lastCreatedCode.id === gid;
     pane.innerHTML = `
-      ${fresh ? `<section class="card notice"><p>Your group is founded. Send the code below to your members so they can join.</p></section>` : ''}
+      ${fresh ? `<section class="card notice"><p>گرووپەکەت دروستکرا. ئەم کۆدەی خوارەوە بنێرە بۆ ئەندامەکانت تا بتوانن بچنە ناوی.</p></section>` : ''}
       <section class="card">
-        <h2 class="section-title">Group Code</h2>
-        <p class="code-show" id="codeShow">&middot; &middot; &middot; &middot; &middot; &middot;</p>
-        <div class="row center"><button class="btn small" id="copyCode">Copy code</button></div>
-        <p class="fine center">Members find &ldquo;${esc(g.name)}&rdquo; under <i>Find a group</i> and enter this code.</p>
+        <h2 class="section-title">کۆدی گرووپ</h2>
+        <p class="code-show" id="codeShow">------</p>
+        <div class="row center"><button class="btn small" id="copyCode">کۆپیکردنی کۆد</button></div>
+        <p class="fine center">ئەندامەکان «${esc(g.name)}» لە بەشی «گەڕان بۆ گرووپ» دەدۆزنەوە و ئەم کۆدە دەنووسن.</p>
       </section>
       <section class="card">
-        <h2 class="section-title">Members</h2>
+        <h2 class="section-title">ئەندامان</h2>
         <ol class="members">
-          ${g.memberIds.map(uid => `<li>${esc(g.memberNames[uid] || '')}${uid === g.ownerId ? ' <small>founder</small>' : ''}${uid === user.uid ? ' <small>you</small>' : ''}</li>`).join('')}
-          ${Array.from({ length: open }, () => `<li class="empty">vacant seat</li>`).join('')}
+          ${g.memberIds.map(uid => `<li>${esc(g.memberNames[uid] || '')}${uid === g.ownerId ? ' <small>دامەزرێنەر</small>' : ''}${uid === user.uid ? ' <small>تۆ</small>' : ''}</li>`).join('')}
+          ${Array.from({ length: open }, () => `<li class="empty">جێگای بەتاڵ</li>`).join('')}
         </ol>
       </section>`;
 
     const show = code => {
       const el = document.getElementById('codeShow');
-      if (el && code) el.textContent = code.split('').join(' ');
+      if (el && code) el.textContent = code;
     };
     if (fresh) show(lastCreatedCode.code);
     else store.getCode(gid).then(show).catch(() => {});
     document.getElementById('copyCode').onclick = async () => {
       const code = (document.getElementById('codeShow').textContent || '').replace(/\D/g, '');
-      try { await navigator.clipboard.writeText(code); toast('Code copied.'); }
-      catch (e) { toast(`The code is ${code}`); }
+      try { await navigator.clipboard.writeText(code); toast('کۆدەکە کۆپی کرا.'); }
+      catch (e) { toast(`کۆدەکە: ${code}`); }
     };
   }
 
   cleanups.push(store.watchGroup(gid, g => {
-    if (!g) { pane.innerHTML = `<section class="card"><p>This group could not be found.</p></section>`; return; }
+    if (!g) { pane.innerHTML = `<section class="card"><p>ئەم گرووپە نەدۆزرایەوە.</p></section>`; return; }
     state.group = g; draw();
   }));
   cleanups.push(store.watchExpenses(gid, week, list => { state.expenses = list; draw(); }));

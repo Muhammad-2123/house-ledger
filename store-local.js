@@ -45,13 +45,13 @@ function currentUser() {
 }
 function requireUser() {
   const u = currentUser();
-  if (!u) throw new Error('Please sign in first.');
+  if (!u) throw new Error('سەرەتا بچۆ ژوورەوە.');
   return u;
 }
 function requireMember(db, gid, uid) {
   const g = db.groups[gid];
-  if (!g) throw new Error('That group no longer exists.');
-  if (!g.memberIds.includes(uid)) throw new Error('You are not a member of this group.');
+  if (!g) throw new Error('ئەم گرووپە نەماوە.');
+  if (!g.memberIds.includes(uid)) throw new Error('تۆ ئەندامی ئەم گرووپە نیت.');
   return g;
 }
 
@@ -69,7 +69,7 @@ export async function signUp({ name, username, password }) {
   const db = load();
   const uname = username.toLowerCase();
   if (Object.values(db.users).some(u => u.username === uname)) {
-    throw new Error('That username is already taken.');
+    throw new Error('ئەم ناوی بەکارهێنەرە پێشتر گیراوە.');
   }
   const uid = id();
   db.users[uid] = { name, username: uname, passHash: await hash(uname + ':' + password) };
@@ -82,7 +82,7 @@ export async function signIn({ username, password }) {
   const uname = username.toLowerCase();
   const entry = Object.entries(db.users).find(([, u]) => u.username === uname);
   if (!entry || entry[1].passHash !== await hash(uname + ':' + password)) {
-    throw new Error('Username or password is not right.');
+    throw new Error('ناوی بەکارهێنەر یان وشەی نهێنی هەڵەیە.');
   }
   localStorage.setItem(SESSION_KEY, entry[0]);
   notify();
@@ -134,10 +134,10 @@ export async function joinGroup(gid, code) {
   const me = requireUser();
   const db = load();
   const g = db.groups[gid];
-  if (!g) throw new Error('That group no longer exists.');
+  if (!g) throw new Error('ئەم گرووپە نەماوە.');
   if (g.memberIds.includes(me.uid)) return;
-  if (db.secrets[gid] !== code) throw new Error('That code is not right. Ask the group founder for it.');
-  if (g.memberIds.length >= g.size) throw new Error('This group is already full.');
+  if (db.secrets[gid] !== code) throw new Error('کۆدەکە هەڵەیە. لە دامەزرێنەری گرووپەکە وەریبگرە.');
+  if (g.memberIds.length >= g.size) throw new Error('ئەم گرووپە پڕ بووە.');
   g.memberIds.push(me.uid);
   g.memberNames[me.uid] = me.name;
   save(db);
@@ -197,7 +197,7 @@ export async function deleteExpense(gid, eid) {
   const db = load();
   const e = db.expenses[gid] && db.expenses[gid][eid];
   if (!e) return;
-  if (e.paidBy !== me.uid) throw new Error('Only the person who paid can strike out an entry.');
+  if (e.paidBy !== me.uid) throw new Error('تەنها ئەو کەسەی پارەی داوە دەتوانێت تۆمارەکە بسڕێتەوە.');
   delete db.expenses[gid][eid];
   save(db);
 }

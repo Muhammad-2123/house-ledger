@@ -51,13 +51,13 @@ function listen(target, onNext, onFail) {
 
 function friendly(err) {
   const code = err && err.code || '';
-  if (code.includes('email-already-in-use')) return new Error('That username is already taken.');
+  if (code.includes('email-already-in-use')) return new Error('ئەم ناوی بەکارهێنەرە پێشتر گیراوە.');
   if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found'))
-    return new Error('Username or password is not right.');
-  if (code.includes('weak-password')) return new Error('The password needs at least 6 characters.');
-  if (code.includes('too-many-requests')) return new Error('Too many tries. Wait a minute and try again.');
-  if (code.includes('permission-denied')) return new Error('That was not allowed. Please try again.');
-  if (code.includes('network') || code.includes('unavailable')) return new Error('No connection. Check the internet and try again.');
+    return new Error('ناوی بەکارهێنەر یان وشەی نهێنی هەڵەیە.');
+  if (code.includes('weak-password')) return new Error('وشەی نهێنی دەبێت لانیکەم 6 پیت بێت.');
+  if (code.includes('too-many-requests')) return new Error('هەوڵەکان زۆر بوون. خولەکێک چاوەڕێ بکە و دووبارە هەوڵ بدەرەوە.');
+  if (code.includes('permission-denied')) return new Error('ئەم کارە ڕێگەپێنەدرا. دووبارە هەوڵ بدەرەوە.');
+  if (code.includes('network') || code.includes('unavailable')) return new Error('ئینتەرنێت نییە. پەیوەندییەکەت بپشکنە و دووبارە هەوڵ بدەرەوە.');
   return err instanceof Error ? err : new Error(String(err));
 }
 
@@ -96,7 +96,7 @@ export async function signIn({ username, password }) {
 export async function signOut() { pendingName = null; await fbSignOut(auth); }
 
 function requireUser() {
-  if (!me) throw new Error('Please sign in first.');
+  if (!me) throw new Error('سەرەتا بچۆ ژوورەوە.');
   return me;
 }
 
@@ -145,10 +145,10 @@ export async function joinGroup(gid, code) {
   const gref = doc(db, 'groups', gid);
   let snap;
   try { snap = await retry(() => getDoc(gref)); } catch (e) { throw friendly(e); }
-  if (!snap.exists()) throw new Error('That group no longer exists.');
+  if (!snap.exists()) throw new Error('ئەم گرووپە نەماوە.');
   const g = snap.data();
   if (g.memberIds.includes(u.uid)) return;
-  if (g.memberIds.length >= g.size) throw new Error('This group is already full.');
+  if (g.memberIds.length >= g.size) throw new Error('ئەم گرووپە پڕ بووە.');
   const batch = writeBatch(db);
   batch.set(doc(db, 'groups', gid, 'joins', u.uid), { code, at: Date.now() });
   batch.update(gref, {
@@ -157,7 +157,7 @@ export async function joinGroup(gid, code) {
   });
   try { await batch.commit(); }
   catch (e) {
-    if (isDenied(e)) throw new Error('That code is not right, or the group just filled up.');
+    if (isDenied(e)) throw new Error('کۆدەکە هەڵەیە، یان گرووپەکە پڕ بووە.');
     throw friendly(e);
   }
 }
