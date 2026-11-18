@@ -25,14 +25,39 @@ const toEmail = u => `${u.toLowerCase()}@members.house-ledger.example.com`;
 let me = null;
 let pendingName = null;
 
+// Right after sign-up/sign-in, Firestore may briefly not see the new login yet
+// and refuse a request. Retry those a few times before giving up.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const isDenied = e => ((e && e.code) || '').includes('permission-denied');
+async function retry(fn, tries = 4) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) { if (!isDenied(e) || i >= tries - 1) throw e; await sleep(600 * (i + 1)); }
+  }
+}
+// Live listener that re-subscribes if it is refused during that same moment.
+function listen(target, onNext, onFail) {
+  let unsub = () => {}, stopped = false, attempts = 0;
+  const start = () => {
+    unsub = onSnapshot(target, snap => { attempts = 0; onNext(snap); }, e => {
+      if (stopped) return;
+      if (isDenied(e) && attempts++ < 4) setTimeout(() => { if (!stopped) start(); }, 700 * attempts);
+      else { console.error(e); onFail && onFail(e); }
+    });
+  };
+  start();
+  return () => { stopped = true; unsub(); };
+}
+
 function friendly(err) {
   const code = err && err.code || '';
   if (code.includes('email-already-in-use')) return new Error('That username is already taken.');
   if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found'))
     return new Error('Username or password is not right.');
   if (code.includes('weak-password')) return new Error('The password needs at least 6 characters.');
-  if (code.includes('permission-denied')) return new Error('That was not allowed. Check the code and try again.');
-  if (code.includes('network')) return new Error('No connection. Check the internet and try again.');
+  if (code.includes('too-many-requests')) return new Error('Too many tries. Wait a minute and try again.');
+  if (code.includes('permission-denied')) return new Error('That was not allowed. Please try again.');
+  if (code.includes('network') || code.includes('unavailable')) return new Error('No connection. Check the internet and try again.');
   return err instanceof Error ? err : new Error(String(err));
 }
 
@@ -40,10 +65,10 @@ export function onUser(cb) {
   return onAuthStateChanged(auth, async u => {
     if (!u) { me = null; cb(null); return; }
     let name = u.displayName || pendingName;
-    let username = u.email ? u.email.split('@')[0] : '';
+    const username = u.email ? u.email.split('@')[0] : '';
     if (!name) {
       try {
-        const snap = await getDoc(doc(db, 'users', u.uid));
+        const snap = await retry(() => getDoc(doc(db, 'users', u.uid)));
         if (snap.exists()) name = snap.data().name;
       } catch (e) { /* ignore */ }
     }
@@ -56,8 +81,10 @@ export async function signUp({ name, username, password }) {
   try {
     pendingName = name;
     const cred = await createUserWithEmailAndPassword(auth, toEmail(username), password);
+    if (me && me.uid === cred.user.uid) me.name = name;
     await updateProfile(cred.user, { displayName: name });
-    await setDoc(doc(db, 'users', cred.user.uid), { name, username: username.toLowerCase() });
+    retry(() => setDoc(doc(db, 'users', cred.user.uid), { name, username: username.toLowerCase() }))
+      .catch(e => console.warn('profile save', e));
   } catch (e) { throw friendly(e); }
 }
 
@@ -77,15 +104,19 @@ export async function createGroup({ name, size, currency }) {
   const u = requireUser();
   const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
   const ref = doc(collection(db, 'groups'));
-  const batch = writeBatch(db);
-  batch.set(ref, {
-    name, nameLower: name.toLowerCase(), size, currency,
-    ownerId: u.uid, ownerName: u.name,
-    memberIds: [u.uid], memberNames: { [u.uid]: u.name },
-    createdAt: Date.now()
-  });
-  batch.set(doc(db, 'groupSecrets', ref.id), { code, ownerId: u.uid });
-  try { await batch.commit(); } catch (e) { throw friendly(e); }
+  try {
+    await retry(() => {
+      const batch = writeBatch(db);
+      batch.set(ref, {
+        name, nameLower: name.toLowerCase(), size, currency,
+        ownerId: u.uid, ownerName: u.name,
+        memberIds: [u.uid], memberNames: { [u.uid]: u.name },
+        createdAt: Date.now()
+      });
+      batch.set(doc(db, 'groupSecrets', ref.id), { code, ownerId: u.uid });
+      return batch.commit();
+    });
+  } catch (e) { throw friendly(e); }
   return { id: ref.id, code };
 }
 
@@ -95,22 +126,25 @@ export async function searchGroups(q) {
   const qy = term
     ? query(collection(db, 'groups'), orderBy('nameLower'), startAt(term), endAt(term + ''), limit(30))
     : query(collection(db, 'groups'), orderBy('nameLower'), limit(30));
-  const snap = await getDocs(qy);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  try {
+    const snap = await retry(() => getDocs(qy));
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (e) { throw friendly(e); }
 }
 
 export function watchMyGroups(cb) {
   const u = requireUser();
   const qy = query(collection(db, 'groups'), where('memberIds', 'array-contains', u.uid));
-  return onSnapshot(qy, snap => {
+  return listen(qy, snap => {
     cb(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAt - a.createdAt));
-  }, e => console.error(e));
+  }, () => cb([]));
 }
 
 export async function joinGroup(gid, code) {
   const u = requireUser();
   const gref = doc(db, 'groups', gid);
-  const snap = await getDoc(gref);
+  let snap;
+  try { snap = await retry(() => getDoc(gref)); } catch (e) { throw friendly(e); }
   if (!snap.exists()) throw new Error('That group no longer exists.');
   const g = snap.data();
   if (g.memberIds.includes(u.uid)) return;
@@ -123,48 +157,48 @@ export async function joinGroup(gid, code) {
   });
   try { await batch.commit(); }
   catch (e) {
-    if ((e.code || '').includes('permission-denied'))
-      throw new Error('That code is not right, or the group just filled up.');
+    if (isDenied(e)) throw new Error('That code is not right, or the group just filled up.');
     throw friendly(e);
   }
 }
 
 export function watchGroup(gid, cb) {
-  return onSnapshot(doc(db, 'groups', gid),
+  return listen(doc(db, 'groups', gid),
     s => cb(s.exists() ? { id: s.id, ...s.data() } : null),
     () => cb(null));
 }
 
 export async function getCode(gid) {
-  const s = await getDoc(doc(db, 'groupSecrets', gid));
+  const s = await retry(() => getDoc(doc(db, 'groupSecrets', gid)));
   return s.exists() ? s.data().code : '';
 }
 
 export function watchExpenses(gid, weekKey, cb) {
   const qy = query(collection(db, 'groups', gid, 'expenses'), where('weekKey', '==', weekKey));
-  return onSnapshot(qy, snap => {
+  return listen(qy, snap => {
     cb(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAt - a.createdAt));
-  }, e => console.error(e));
+  });
 }
 
 export async function addExpense(gid, { item, amount, includeMe, weekKey }) {
   const u = requireUser();
+  const ref = doc(collection(db, 'groups', gid, 'expenses'));
   try {
-    await setDoc(doc(collection(db, 'groups', gid, 'expenses')), {
+    await retry(() => setDoc(ref, {
       item, amount, weekKey,
       paidBy: u.uid, paidByName: u.name,
       participants: includeMe ? [u.uid] : [],
       createdAt: Date.now()
-    });
+    }));
   } catch (e) { throw friendly(e); }
 }
 
 export async function setParticipation(gid, eid, join) {
   const u = requireUser();
   try {
-    await updateDoc(doc(db, 'groups', gid, 'expenses', eid), {
+    await retry(() => updateDoc(doc(db, 'groups', gid, 'expenses', eid), {
       participants: join ? arrayUnion(u.uid) : arrayRemove(u.uid)
-    });
+    }));
   } catch (e) { throw friendly(e); }
 }
 
@@ -174,14 +208,13 @@ export async function deleteExpense(gid, eid) {
 }
 
 export function watchWeek(gid, weekKey, cb) {
-  return onSnapshot(doc(db, 'groups', gid, 'weeks', weekKey),
-    s => cb(s.exists() ? { paid: {}, ...s.data() } : { paid: {} }),
-    e => console.error(e));
+  return listen(doc(db, 'groups', gid, 'weeks', weekKey),
+    s => cb(s.exists() ? { paid: {}, ...s.data() } : { paid: {} }));
 }
 
 export async function setPaid(gid, weekKey, key, value) {
   try {
-    await setDoc(doc(db, 'groups', gid, 'weeks', weekKey),
-      { paid: { [key]: value ? true : deleteField() } }, { merge: true });
+    await retry(() => setDoc(doc(db, 'groups', gid, 'weeks', weekKey),
+      { paid: { [key]: value ? true : deleteField() } }, { merge: true }));
   } catch (e) { throw friendly(e); }
 }
