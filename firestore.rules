@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function groupPath(gid) { return /databases/$(database)/documents/groups/$(gid); }
+    function isMember(gid) {
+      return signedIn() && request.auth.uid in get(groupPath(gid)).data.memberIds;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /groups/{gid} {
+      // Anyone signed in can find a group by name (the code stays hidden).
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.memberIds == [request.auth.uid]
+        && request.resource.data.size is int
+        && request.resource.data.size >= 2 && request.resource.data.size <= 20
+        && existsAfter(/databases/$(database)/documents/groupSecrets/$(gid));
+
+      // Joining: you may only add yourself, the group must have a free seat,
+      // and in the same write you must have filed the correct 6-digit code.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'memberNames'])
+        && !(request.auth.uid in resource.data.memberIds)
+        && request.resource.data.memberIds == resource.data.memberIds.concat([request.auth.uid])
+        && request.resource.data.memberIds.size() <= resource.data.size
+        && existsAfter(/databases/$(database)/documents/groups/$(gid)/joins/$(request.auth.uid));
+
+      match /joins/{uid} {
+        allow create, update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.code == get(/databases/$(database)/documents/groupSecrets/$(gid)).data.code;
+      }
+
+      match /expenses/{eid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid)
+          && request.resource.data.paidBy == request.auth.uid
+          && request.resource.data.amount is number && request.resource.data.amount > 0
+          && request.resource.data.item is string && request.resource.data.item.size() <= 120
+          && request.resource.data.participants.hasOnly([request.auth.uid]);
+        // Each person may only put themselves in or take themselves out.
+        allow update: if isMember(gid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants'])
+          && request.resource.data.participants.toSet().difference(resource.data.participants.toSet()).hasOnly([request.auth.uid])
+          && resource.data.participants.toSet().difference(request.resource.data.participants.toSet()).hasOnly([request.auth.uid]);
+        allow delete: if isMember(gid) && resource.data.paidBy == request.auth.uid;
+      }
+
+      match /weeks/{week} {
+        allow read, write: if isMember(gid);
+      }
+    }
+
+    match /groupSecrets/{gid} {
+      allow read: if signedIn()
+        && (resource.data.ownerId == request.auth.uid || isMember(gid));
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.code is string && request.resource.data.code.size() == 6
+        && getAfter(groupPath(gid)).data.ownerId == request.auth.uid;
+    }
+  }
+}
